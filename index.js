@@ -390,116 +390,125 @@ class BinanceWebSocket {
     }
     
     async getAIAnalysis(symbol, price, priceChange, priceHistory) {
-        try {
-            // 计算技术指标
-            const prices = priceHistory.map(item => item.price);
-            const times = priceHistory.map(item => new Date(item.timestamp).toLocaleTimeString());
-            
-            // 计算移动平均线
-            const ma5 = calculateMA(prices, 5);
-            const ma10 = calculateMA(prices, 10);
-            const ma20 = calculateMA(prices, 20);
-            
-            // 计算RSI
-            const rsi = calculateRSI(prices, 14);
-            
-            // 计算布林带
-            const { upper, middle, lower } = calculateBollingerBands(prices, 20, 2);
-            
-            // 计算成交量分析
-            const volumeAnalysis = await getVolumeAnalysis(symbol);
-            
-            // 获取市场情绪数据
-            const marketSentiment = await getMarketSentiment(symbol);
-            
-            // 计算支撑位和阻力位
-            const { supports, resistances } = calculateSupportResistance(prices);
-
-            // 构建增强的AI分析提示
-            let prompt = `作为一位专业的加密货币分析师，请对${symbol}进行全面深入的技术分析。
-
-基础数据:
-- 当前价格: ${price} USDT
-- 30分钟价格变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
-- 价格历史: ${JSON.stringify(prices)}
-
-技术指标:
-- MA5: ${ma5[ma5.length - 1]}
-- MA10: ${ma10[ma10.length - 1]}
-- MA20: ${ma20[ma20.length - 1]}
-- RSI(14): ${rsi.toFixed(2)}
-- 布林带:
-  * 上轨: ${upper[upper.length - 1]}
-  * 中轨: ${middle[middle.length - 1]}
-  * 下轨: ${lower[lower.length - 1]}
-
-市场数据:
-- 24小时成交量: ${volumeAnalysis.volume24h} USDT
-- 买卖比例: ${volumeAnalysis.buyVsSell}
-- 大单交易占比: ${volumeAnalysis.largeTransactions}%
-- 市场情绪指数: ${marketSentiment.score}
-- 社交媒体讨论热度: ${marketSentiment.socialVolume}
-
-价格关键位:
-- 支撑位: ${supports.join(', ')} USDT
-- 阻力位: ${resistances.join(', ')} USDT
-
-请提供以下分析:
-
-1. 技术面分析:
-   - 移动平均线趋势判断
-   - RSI超买超卖分析
-   - 布林带位置判断
-   - 支撑位和阻力位分析
-   - 可能的价格突破点位
-
-2. 市场情绪分析:
-   - 当前市场情绪评估
-   - 大资金流向判断
-   - 社交媒体情绪影响
-   - 潜在的市场催化剂
-
-3. 交易量分析:
-   - 成交量变化趋势
-   - 大单交易影响
-   - 买卖压力分析
-
-4. 风险评估:
-   - 短期风险因素
-   - 止损位建议
-   - 波动风险预警
-   - 潜在风险事件
-
-5. 操作建议:
-   - 短期价格目标
-   - 建议入场位
-   - 止损止盈位
-   - 仓位管理建议
-
-请用专业简洁的语言回答，重点突出异常信号和重要风险。`;
-
-            // 调用 DeepSeek API
-            const response = await axios.post(
-                DEEPSEEK_API_URL,
-                {
-                    model: "deepseek-chat",
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.7,
-                    max_tokens: 1500  // 增加token限制以获取更详细的分析
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-                    }
+        // 设置重试参数
+        const maxRetries = 3;
+        let retryCount = 0;
+        let lastError = null;
+        
+        while (retryCount < maxRetries) {
+            try {
+                // 简化数据处理，只使用价格历史数据
+                const prices = priceHistory.map(item => item.price);
+                const times = priceHistory.map(item => new Date(item.timestamp).toLocaleTimeString());
+                
+                // 构建简化的提示，与BTC分析保持一致
+                let prompt = `作为一位专业的加密货币分析师，请对${symbol}进行简要分析：\n\n` +
+                    `当前价格: ${price} USDT\n` +
+                    `30分钟变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n\n` +
+                    `价格历史数据:\n${JSON.stringify(prices)}\n\n`;
+                
+                // 如果有历史分析，添加到提示中
+                if (this.aiAnalysisHistory && this.aiAnalysisHistory.has(symbol) && this.aiAnalysisHistory.get(symbol).length > 0) {
+                    const lastAnalysis = this.aiAnalysisHistory.get(symbol)[this.aiAnalysisHistory.get(symbol).length - 1];
+                    prompt += `上次分析时间: ${new Date(lastAnalysis.timestamp).toLocaleString()}\n` +
+                        `上次分析价格: ${lastAnalysis.price} USDT\n` +
+                        `上次分析变化: ${lastAnalysis.priceChange > 0 ? '+' : ''}${lastAnalysis.priceChange.toFixed(2)}%\n` +
+                        `上次分析内容:\n${lastAnalysis.analysis}\n\n`;
                 }
-            );
-
-            return response.data.choices[0].message.content;
-        } catch (error) {
-            console.error('调用DeepSeek API时出错:', error);
-            return '无法获取AI分析，请稍后再试。';
+                
+                prompt += `请提供以下分析：\n` +
+                    `1. 市场分析：\n` +
+                    `   - 价格变动的主要原因\n` +
+                    `   - 市场情绪分析\n` +
+                    `   - 技术面分析\n\n` +
+                    `2. 投资建议：\n` +
+                    `   - 短期操作建议\n` +
+                    `   - 风险提示\n` +
+                    `   - 关键价位关注点\n\n` +
+                    `3. 市场展望：\n` +
+                    `   - 可能的发展趋势\n` +
+                    `   - 需要关注的重要事件\n` +
+                    `   - 潜在机会和风险\n\n` +
+                    `请用简洁专业的语言回答，突出重点。`;
+                
+                console.log(`正在为 ${symbol} 请求AI分析 (尝试 ${retryCount + 1}/${maxRetries})...`);
+                
+                // 调用 DeepSeek API，使用与BTC分析相同的参数
+                const response = await axios.post(
+                    DEEPSEEK_API_URL,
+                    {
+                        model: "deepseek-chat",
+                        messages: [{ role: "user", content: prompt }],
+                        temperature: 0.7,
+                        max_tokens: 1200  // 与BTC分析保持一致
+                    },
+                    {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+                        },
+                        timeout: 30000  // 设置30秒超时
+                    }
+                );
+                
+                console.log(`成功获取 ${symbol} 的AI分析`);
+                const analysis = response.data.choices[0].message.content;
+                
+                // 保存分析历史
+                if (!this.aiAnalysisHistory) {
+                    this.aiAnalysisHistory = new Map();
+                }
+                if (!this.aiAnalysisHistory.has(symbol)) {
+                    this.aiAnalysisHistory.set(symbol, []);
+                }
+                
+                this.aiAnalysisHistory.get(symbol).push({
+                    timestamp: Date.now(),
+                    price: price,
+                    priceChange: priceChange,
+                    analysis: analysis
+                });
+                
+                // 只保留最近5条分析记录
+                if (this.aiAnalysisHistory.get(symbol).length > 5) {
+                    this.aiAnalysisHistory.get(symbol).shift();
+                }
+                
+                return analysis;
+            } catch (error) {
+                retryCount++;
+                lastError = error;
+                console.error(`调用DeepSeek API时出错 (${symbol}, 尝试 ${retryCount}/${maxRetries}):`, error.message);
+                
+                if (error.response) {
+                    console.error('API响应状态:', error.response.status);
+                    console.error('API响应数据:', error.response.data);
+                }
+                
+                if (retryCount >= maxRetries) {
+                    console.error(`已达到最大重试次数，放弃获取 ${symbol} 的AI分析`);
+                    break;
+                }
+                
+                // 等待一段时间后重试，重试间隔逐渐增加
+                const retryDelay = 2000 * retryCount;
+                console.log(`等待 ${retryDelay/1000} 秒后重试...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
         }
+        
+        // 所有重试都失败后，返回简单分析
+        console.error(`所有重试都失败，使用简单分析替代 (${symbol})`);
+        return this.getSimpleAnalysis(symbol, price, priceChange);
+    }
+
+    // 添加简单分析作为备用
+    getSimpleAnalysis(symbol, price, priceChange) {
+        const trend = priceChange > 0 ? '上涨' : '下跌';
+        const strength = Math.abs(priceChange) > 10 ? '强势' : (Math.abs(priceChange) > 5 ? '中等' : '弱势');
+        
+        return `简单分析：${symbol}当前呈现${strength}${trend}趋势，价格变化为${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%。\n\n` +
+               `建议：密切关注价格走势，设置止损位保护资金安全。`;
     }
 
     // 计算移动平均线
@@ -644,15 +653,32 @@ class BinanceWebSocket {
     }
 
     async notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis) {
-        const emoji = priceChange > 0 ? '📈' : '📉';
-        const trend = priceChange > 0 ? '上涨' : '下跌';
+        const emoji = priceChange > 0 ? '🚀 🔥' : '📉 🔥';
+        const trend = priceChange > 0 ? '突然上涨' : '突然下跌';
         
-        const message = `${emoji} *${symbol} 价格${trend}提醒* ${emoji}\n\n` +
-            `*交易对:* ${symbol}\n` +
-            `*当前价格:* ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
-            `*短期变化:* ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n` +
-            `\n*AI分析:*\n${aiAnalysis}\n\n` +
-            `_时间: ${new Date().toLocaleString()}_`;
+        // 格式化当前时间
+        const now = new Date();
+        const formattedTime = now.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        }).replace(/\//g, '/');
+        
+        // 检查是否是重点监控代币
+        const isFocusSymbol = this.focusSymbols.has(symbol);
+        const focusEmoji = isFocusSymbol ? '重点监控代币 🔥\n' : '';
+        
+        const message = `${emoji} ${symbol} ${trend}提醒 ${emoji}\n\n` +
+            `交易对: ${symbol}\n` +
+            `当前价格: ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
+            `短期变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n` +
+            `${focusEmoji}\n` +
+            `AI分析:\n${aiAnalysis}\n\n` +
+            `时间: ${formattedTime}`;
         
         // 只发送到电报频道
         bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { parse_mode: 'Markdown' });
