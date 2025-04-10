@@ -38,88 +38,95 @@ sudo apt install -y screen
 
 ### 3. 部署步骤
 ```bash
-# 克隆项目
+# 1. 克隆项目
 git clone https://github.com/mumumusf/tgyoyom.git
 cd tgyoyom
 
-# 安装依赖
+# 2. 安装依赖
 npm install
 
-# 创建并编辑环境配置文件
-cp .env.example .env
+# 3. 创建并编辑环境配置文件
+# 使用nano编辑器创建.env文件
 nano .env
-```
 
-### 4. 配置说明
-在`.env`文件中配置以下信息：
-```env
-# Telegram配置
+# 4. 在打开的编辑器中粘贴以下内容（替换相应的值）：
 TELEGRAM_BOT_TOKEN=你的机器人token
 TELEGRAM_CHANNEL_ID=你的频道ID
-
-# Binance API配置
-BINANCE_REST_API=https://api.binance.com
+BINANCE_REST_API=https://api.binance.com/api/v3
 BINANCE_WS_ENDPOINT=wss://stream.binance.com:9443/ws
-
-# DeepSeek API配置
 DEEPSEEK_API_KEY=你的DeepSeek API密钥
 DEEPSEEK_API_URL=https://api.deepseek.com/v1/chat/completions
-```
+PRICE_CHANGE_THRESHOLD=1.0
 
-### 5. 启动服务
-```bash
-# 创建新的screen会话
+# 5. 保存文件
+# 按 Ctrl + X，然后按 Y，最后按 Enter
+
+# 6. 设置文件权限
+chmod 600 .env
+
+# 7. 验证环境变量是否正确加载
+node -e "require('dotenv').config(); console.log('BINANCE_WS_ENDPOINT:', process.env.BINANCE_WS_ENDPOINT)"
+
+# 8. 创建screen会话并启动服务
 screen -S crypto-bot
-
-# 在screen会话中启动服务
 node index.js
 
-# 分离screen会话（按Ctrl+A，然后按D）
+# 9. 分离screen会话
+# 按 Ctrl + A，然后按 D
 ```
 
-### 6. 维护命令
+### 4. 验证部署
 ```bash
-# 查看所有screen会话
+# 1. 检查screen会话是否在运行
 screen -ls
 
-# 重新连接到screen会话
+# 2. 查看运行日志
 screen -r crypto-bot
 
-# 结束screen会话
-screen -X -S crypto-bot quit
-
-# 查看日志（在screen会话中）
-# 日志会直接显示在终端中
+# 3. 检查环境变量
+node -e "require('dotenv').config(); console.log(process.env)"
 ```
 
-### 7. 故障排除
-1. 检查服务状态
-```bash
-# 查看所有screen会话
-screen -ls
+### 5. 常见问题解决
 
-# 查看运行日志
+#### 5.1 环境变量未加载
+如果遇到 "Invalid URL: undefined" 错误：
+```bash
+# 1. 检查.env文件是否存在
+ls -la .env
+
+# 2. 检查文件权限
+chmod 600 .env
+
+# 3. 验证环境变量
+node -e "require('dotenv').config(); console.log(process.env.BINANCE_WS_ENDPOINT)"
+
+# 4. 如果环境变量未正确加载，尝试重新创建.env文件
+rm .env
+nano .env
+# 重新粘贴配置内容
+```
+
+#### 5.2 服务无法启动
+```bash
+# 1. 检查Node.js版本
+node -v
+
+# 2. 检查依赖是否正确安装
+npm install
+
+# 3. 检查日志
 screen -r crypto-bot
 ```
 
-2. 检查系统资源
-```bash
-htop
-```
-
-3. 常见问题解决：
-- 如果服务无法启动，检查`.env`配置是否正确
-- 如果出现内存不足，可以增加swap空间
-- 如果出现网络问题，检查防火墙设置
-- 如果screen会话意外断开，使用`screen -r`重新连接
-
-4. 自动重启脚本（可选）
-创建`restart.sh`：
+#### 5.3 自动重启脚本
+创建 `restart.sh`：
 ```bash
 #!/bin/bash
 screen -X -S crypto-bot quit
 screen -dmS crypto-bot
-screen -S crypto-bot -X stuff "cd /path/to/tgyoyom && node index.js$(echo -e '\015')"
+screen -S crypto-bot -X stuff "cd /home/ubuntu/tgyoyom && node index.js$(echo -e '\015')"
+chmod +x restart.sh
 ```
 
 ## 新手使用教程
