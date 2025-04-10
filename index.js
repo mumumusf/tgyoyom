@@ -656,18 +656,6 @@ class BinanceWebSocket {
         const emoji = priceChange > 0 ? '🚀 🔥' : '📉 🔥';
         const trend = priceChange > 0 ? '突然上涨' : '突然下跌';
         
-        // 格式化当前时间
-        const now = new Date();
-        const formattedTime = now.toLocaleString('zh-CN', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        }).replace(/\//g, '/');
-        
         // 检查是否是重点监控代币
         const isFocusSymbol = this.focusSymbols.has(symbol);
         const focusEmoji = isFocusSymbol ? '重点监控代币 🔥\n' : '';
@@ -677,8 +665,7 @@ class BinanceWebSocket {
             `当前价格: ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
             `短期变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n` +
             `${focusEmoji}\n` +
-            `AI分析:\n${aiAnalysis}\n\n` +
-            `时间: ${formattedTime}`;
+            `AI分析:\n${aiAnalysis}`;
         
         // 只发送到电报频道
         bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { parse_mode: 'Markdown' });
