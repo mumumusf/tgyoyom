@@ -60,6 +60,8 @@ class BinanceWebSocket {
         this.aiFollowUpTimers = new Map(); // 存储AI跟进分析定时器
         this.btcDailyAnalysisTimer = null; // BTC每日分析定时器
         this.btcAnalysisHistory = []; // 存储BTC分析历史
+        this.alertHistory = new Map(); // 存储每个代币的提醒历史
+        this.analysisSummary = new Map(); // 存储每个代币的分析总结
     }
 
     connect() {
@@ -265,7 +267,7 @@ class BinanceWebSocket {
             
             message += `${index + 1}. *${token.symbol}*\n`;
             message += `   • 当前价格: ${token.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n`;
-            message += `   • 24小时变化: ${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}% (${trend}) ${emoji}\n`;
+            message += `   • 24小时变化: ${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}% (${trend})\n`;
             message += `   • 24小时成交量: ${token.volume.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ${token.symbol.replace('USDT', '')}\n\n`;
         }
         
@@ -366,8 +368,8 @@ class BinanceWebSocket {
             const oldestPrice = history[0].price;
             priceChange = ((price - oldestPrice) / oldestPrice) * 100;
             
-            // 只在价格突变时发送提醒
-            if (Math.abs(priceChange) >= SHORT_TERM_PRICE_CHANGE_THRESHOLD) {
+            // 只在价格突变时发送提醒，且只针对交易量前10的代币
+            if (Math.abs(priceChange) >= SHORT_TERM_PRICE_CHANGE_THRESHOLD && this.focusSymbols.has(symbol)) {
                 const symbolData = allSymbolsData.get(symbol);
                 if (now - symbolData.lastShortTermAlertTime > 15 * 60 * 1000) { // 15分钟内不重复提醒
                     symbolData.lastShortTermAlertTime = now;
@@ -375,26 +377,43 @@ class BinanceWebSocket {
                     // 获取AI分析
                     const aiAnalysis = await this.getAIAnalysis(symbol, price, priceChange);
                     
-                    // 发送突变提醒
-                    this.notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis);
-                    
-                    // 如果是前20名交易量的代币，设置10分钟后的跟进分析
-                    const symbolRank = Array.from(this.topSymbols).indexOf(symbol);
-                    if (symbolRank < 20) {
-                        setTimeout(async () => {
-                            // 获取最新价格和变化
-                            const currentData = allSymbolsData.get(symbol);
-                            if (currentData) {
-                                const followUpAnalysis = await this.getAIFollowUpAnalysis(
-                                    symbol, 
-                                    currentData.lastPrice, 
-                                    priceChange,
-                                    price // 原始触发价格
-                                );
-                                this.notifyFollowUpAnalysis(symbol, currentData.lastPrice, priceChange, followUpAnalysis);
-                            }
-                        }, 10 * 60 * 1000); // 10分钟后
+                    // 更新提醒历史
+                    if (!this.alertHistory.has(symbol)) {
+                        this.alertHistory.set(symbol, []);
                     }
+                    const alerts = this.alertHistory.get(symbol);
+                    alerts.push({
+                        timestamp: now,
+                        price,
+                        priceChange,
+                        analysis: aiAnalysis
+                    });
+                    
+                    // 如果提醒次数达到3次或以上，生成分析总结
+                    if (alerts.length >= 3) {
+                        const summary = await this.generateAnalysisSummary(symbol, alerts);
+                        this.analysisSummary.set(symbol, summary);
+                        
+                        // 发送突变提醒（包含分析总结）
+                        this.notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis, summary);
+                    } else {
+                        // 发送普通突变提醒
+                        this.notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis);
+                    }
+                    
+                    // 设置10分钟后的跟进分析
+                    setTimeout(async () => {
+                        const currentData = allSymbolsData.get(symbol);
+                        if (currentData) {
+                            const followUpAnalysis = await this.getAIFollowUpAnalysis(
+                                symbol, 
+                                currentData.lastPrice, 
+                                priceChange,
+                                price
+                            );
+                            this.notifyFollowUpAnalysis(symbol, currentData.lastPrice, priceChange, followUpAnalysis);
+                        }
+                    }, 10 * 60 * 1000);
                 }
             }
         }
@@ -462,7 +481,13 @@ class BinanceWebSocket {
 2.支撑位：${price * 0.95} USDT
 3.阻力位：${price * 1.05} USDT
 4.建议：(15字)
-5.风险：(15字)`;
+5.风险：(15字)
+6.开单建议：
+- 方向：${priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${price} USDT
+- 止损价：${price * 0.95} USDT
+- 止盈价：${price * 1.05} USDT
+- 仓位：10%`;
     }
 
     // 简化备用分析方法
@@ -482,7 +507,13 @@ class BinanceWebSocket {
 2.支撑位：${support} USDT
 3.阻力位：${resistance} USDT
 4.建议：${advice}
-5.风险：注意市场波动`;
+5.风险：注意市场波动
+6.开单建议：
+- 方向：${priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${price} USDT
+- 止损价：${support} USDT
+- 止盈价：${resistance} USDT
+- 仓位：10%`;
     }
 
     // 计算移动平均线
@@ -626,22 +657,23 @@ class BinanceWebSocket {
         };
     }
 
-    async notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis) {
+    async notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis, summary = null) {
         const emoji = priceChange > 0 ? '🚀 🔥' : '📉 🔥';
         const trend = priceChange > 0 ? '突然上涨' : '突然下跌';
         
-        // 检查是否是重点监控代币
-        const isFocusSymbol = this.focusSymbols.has(symbol);
-        const focusEmoji = isFocusSymbol ? '重点监控代币 🔥\n' : '';
-        
-        const message = `${emoji} ${symbol} ${trend}提醒 ${emoji}\n\n` +
+        let message = `${emoji} ${symbol} ${trend}提醒 ${emoji}\n\n` +
             `交易对: ${symbol}\n` +
             `当前价格: ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
             `短期变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n` +
-            `${focusEmoji}\n` +
+            `重点监控代币 🔥\n\n` +
             `AI分析:\n${aiAnalysis}`;
         
-        // 只发送到电报频道
+        // 如果有分析总结，添加到消息中
+        if (summary) {
+            message += `\n\n📊 *多次提醒分析总结* 📊\n${summary}`;
+        }
+        
+        // 发送到电报频道
         bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { parse_mode: 'Markdown' });
     }
 
@@ -731,7 +763,7 @@ class BinanceWebSocket {
     
     async getBTCAIAnalysis(currentPrice, priceChange, klineData) {
         try {
-            const prompt = `分析BTC：
+            const prompt = `分析比特币(BTC)：
 价格:${currentPrice} USDT
 24h变化:${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
 
@@ -739,7 +771,13 @@ class BinanceWebSocket {
 2.支撑位：${currentPrice * 0.95} USDT
 3.阻力位：${currentPrice * 1.05} USDT
 4.建议：(15字)
-5.风险：(15字)`;
+5.风险：(15字)
+6.开单建议：
+- 方向：${priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${currentPrice} USDT
+- 止损价：${currentPrice * 0.95} USDT
+- 止盈价：${currentPrice * 1.05} USDT
+- 仓位：10%`;
             
             const response = await axios.post(
                 process.env.DEEPSEEK_API_URL,
@@ -792,13 +830,19 @@ class BinanceWebSocket {
 总体变化: ${totalPriceChange > 0 ? '+' : ''}${totalPriceChange.toFixed(2)}%
 
 请分析:
-1.趋势验证(20字)：与触发时相比，价格走势是否符合预期
+1.趋势验证(20字)：当前价格走势是否符合预期
 2.盈亏分析(20字)：如果按之前建议操作，当前盈亏情况
 3.最新建议(30字)：基于当前价格的操作建议
 4.风险提示(20字)：需要注意的风险点
 5.关键价位：
 - 支撑位：${(currentPrice * 0.95).toFixed(8)} USDT
-- 阻力位：${(currentPrice * 1.05).toFixed(8)} USDT`;
+- 阻力位：${(currentPrice * 1.05).toFixed(8)} USDT
+6.开单建议：
+- 方向：${totalPriceChange > 0 ? '做多' : '做空'}
+- 开仓价：${currentPrice} USDT
+- 止损价：${(currentPrice * 0.95).toFixed(8)} USDT
+- 止盈价：${(currentPrice * 1.05).toFixed(8)} USDT
+- 仓位：10%`;
 
             const response = await axios.post(process.env.DEEPSEEK_API_URL, {
                 model: "deepseek-chat",
@@ -856,7 +900,13 @@ class BinanceWebSocket {
 4.风险提示：${risk}
 5.关键价位：
 - 支撑位：${(currentPrice * 0.95).toFixed(8)} USDT
-- 阻力位：${(currentPrice * 1.05).toFixed(8)} USDT`;
+- 阻力位：${(currentPrice * 1.05).toFixed(8)} USDT
+6.开单建议：
+- 方向：${totalPriceChange > 0 ? '做多' : '做空'}
+- 开仓价：${currentPrice} USDT
+- 止损价：${(currentPrice * 0.95).toFixed(8)} USDT
+- 止盈价：${(currentPrice * 1.05).toFixed(8)} USDT
+- 仓位：10%`;
     }
 
     // 发送跟进分析通知
@@ -869,6 +919,53 @@ class BinanceWebSocket {
 
         // 发送到电报频道
         bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { parse_mode: 'Markdown' });
+    }
+
+    // 添加生成分析总结的方法
+    async generateAnalysisSummary(symbol, alerts) {
+        const prompt = `分析${symbol}的多次价格变动：
+
+${alerts.map((alert, index) => `
+第${index + 1}次提醒：
+时间：${new Date(alert.timestamp).toLocaleString()}
+价格：${alert.price} USDT
+变化：${alert.priceChange > 0 ? '+' : ''}${alert.priceChange.toFixed(2)}%
+分析：${alert.analysis}
+`).join('\n')}
+
+请总结：
+1.价格走势：(20字)
+2.趋势变化：(20字)
+3.风险等级：(10字)
+4.操作建议：(30字)
+5.关键价位：
+- 支撑位：${alerts[alerts.length - 1].price * 0.95} USDT
+- 阻力位：${alerts[alerts.length - 1].price * 1.05} USDT
+6.开单建议：
+- 方向：${alerts[alerts.length - 1].priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${alerts[alerts.length - 1].price} USDT
+- 止损价：${alerts[alerts.length - 1].price * 0.95} USDT
+- 止盈价：${alerts[alerts.length - 1].price * 1.05} USDT
+- 仓位：10%`;
+
+        try {
+            const response = await axios.post(process.env.DEEPSEEK_API_URL, {
+                model: "deepseek-chat",
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.7,
+                max_tokens: 800
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            return response.data.choices[0].message.content;
+        } catch (error) {
+            console.error('生成分析总结失败:', error);
+            return '无法生成分析总结';
+        }
     }
 }
 
