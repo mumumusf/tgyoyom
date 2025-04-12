@@ -359,17 +359,13 @@ class BinanceWebSocket {
         const history = this.priceHistory.get(symbol);
         history.push({ price, timestamp: now });
         
-        // 清理30分钟以前的数据并限制大小
-        const recentHistory = history.filter(record => now - record.timestamp <= 30 * 60 * 1000);
-        if (recentHistory.length > 100) { // 限制最多保存100条记录
-            recentHistory.splice(0, recentHistory.length - 100);
-        }
-        this.priceHistory.set(symbol, recentHistory);
+        // 清理30分钟以前的数据
+        history.filter(record => now - record.timestamp <= 30 * 60 * 1000);
         
         // 计算30分钟价格变化
         let priceChange = 0;
-        if (recentHistory.length > 1) {
-            const oldestPrice = recentHistory[0].price;
+        if (history.length > 1) {
+            const oldestPrice = history[0].price;
             priceChange = ((price - oldestPrice) / oldestPrice) * 100;
             
             // 只在价格突变时发送提醒，且只针对交易量前10的代币
@@ -386,38 +382,23 @@ class BinanceWebSocket {
                         this.alertHistory.set(symbol, []);
                     }
                     const alerts = this.alertHistory.get(symbol);
+                    alerts.push({
+                        timestamp: now,
+                        price,
+                        priceChange,
+                        analysis: aiAnalysis
+                    });
                     
-                    // 清理15分钟前的提醒记录
-                    const recentAlerts = alerts.filter(alert => 
-                        (Date.now() - alert.timestamp) <= 15 * 60 * 1000
-                    );
-                    
-                    // 更新提醒历史
-                    this.alertHistory.set(symbol, recentAlerts);
-                    
-                    // 价格变动超过5%时触发提醒
-                    if (Math.abs(priceChange) >= 5) {
-                        // 检查是否在15分钟内已经提醒过
-                        const lastAlert = recentAlerts[recentAlerts.length - 1];
-                        const timeSinceLastAlert = lastAlert ? Date.now() - lastAlert.timestamp : 15 * 60 * 1000;
+                    // 如果提醒次数达到3次或以上，生成分析总结
+                    if (alerts.length >= 3) {
+                        const summary = await this.generateAnalysisSummary(symbol, alerts);
+                        this.analysisSummary.set(symbol, summary);
                         
-                        // 如果距离上次提醒超过5分钟，或者15分钟内提醒次数少于3次，则发送提醒
-                        if (timeSinceLastAlert > 5 * 60 * 1000 || recentAlerts.length < 3) {
-                            // 发送提醒
-                            await this.notifyShortTermPriceAlert(symbol, price, priceChange);
-                            
-                            // 如果15分钟内提醒达到3次，生成分析总结
-                            if (recentAlerts.length + 1 >= 3) {
-                                const summary = await this.generateAnalysisSummary(symbol, [...recentAlerts, {
-                                    timestamp: Date.now(),
-                                    price,
-                                    priceChange,
-                                    analysis: aiAnalysis
-                                }]);
-                                // 单独发送分析总结
-                                await this.notifyShortTermPriceAlert(symbol, price, priceChange, null, summary);
-                            }
-                        }
+                        // 发送突变提醒（包含分析总结）
+                        this.notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis, summary);
+                    } else {
+                        // 发送普通突变提醒
+                        this.notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis);
                     }
                     
                     // 设置10分钟后的跟进分析
@@ -448,7 +429,6 @@ class BinanceWebSocket {
     async getAIAnalysis(symbol, price, priceChange) {
         const maxRetries = 3;
         let retryCount = 0;
-        let lastError = null;
         
         while (retryCount < maxRetries) {
             try {
@@ -456,9 +436,11 @@ class BinanceWebSocket {
                 const delay = Math.floor(Math.random() * 2000) + (retryCount * 2000);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 
+                const prompt = this.constructAIPrompt(symbol, price, priceChange);
+                
                 const response = await axios.post(process.env.DEEPSEEK_API_URL, {
                     model: "deepseek-chat",
-                    messages: [{ role: "user", content: this.constructAIPrompt(symbol, price, priceChange) }],
+                    messages: [{ role: "user", content: prompt }],
                     temperature: 0.7,
                     max_tokens: 1200,
                     stream: false
@@ -467,7 +449,7 @@ class BinanceWebSocket {
                         'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`,
                         'Content-Type': 'application/json'
                     },
-                    timeout: 30000 // 设置30秒超时
+                    timeout: 60000 // 增加超时时间到60秒
                 });
 
                 if (response.data && response.data.choices && response.data.choices[0]) {
@@ -478,18 +460,11 @@ class BinanceWebSocket {
                 throw new Error('API响应格式无效');
                 
             } catch (error) {
-                lastError = error;
                 retryCount++;
                 console.log(`AI分析重试 ${retryCount}/${maxRetries} - ${symbol} - ${error.message}`);
                 
-                // 如果是API限流错误，增加等待时间
-                if (error.response && error.response.status === 429) {
-                    const retryAfter = error.response.headers['retry-after'] || 5;
-                    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-                }
-                
                 if (retryCount === maxRetries) {
-                    console.log(`AI分析重试次数已达上限，切换到简单分析 - ${symbol} - 最后错误: ${lastError.message}`);
+                    console.log(`AI分析重试次数已达上限，切换到简单分析 - ${symbol}`);
                     return this.getSimpleAnalysis(symbol, price, priceChange);
                 }
             }
@@ -502,24 +477,17 @@ class BinanceWebSocket {
 价格:${price} USDT
 变化:${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
 
-请根据以下因素综合分析：
-1.价格趋势：(15字)
-2.成交量：(15字)
-3.市场情绪：(15字)
-4.技术形态：(15字)
-5.支撑位：${price * 0.95} USDT
-6.阻力位：${price * 1.05} USDT
-7.操作建议：(20字)
-8.风险提示：(20字)
-
-最后给出明确的交易建议：
-1.交易方向：(必须明确选择"做多"或"做空"，并说明原因)
-2.开仓价格：${price} USDT
-3.止损价格：${price * 0.95} USDT
-4.止盈价格：${price * 1.05} USDT
-5.建议仓位：10%
-6.持仓时间：建议持仓时间
-7.注意事项：具体操作建议和风险提示`;
+1.趋势：(15字)
+2.支撑位：${price * 0.95} USDT
+3.阻力位：${price * 1.05} USDT
+4.建议：(15字)
+5.风险：(15字)
+6.开单建议：
+- 方向：${priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${price} USDT
+- 止损价：${price * 0.95} USDT
+- 止盈价：${price * 1.05} USDT
+- 仓位：10%`;
     }
 
     // 简化备用分析方法
@@ -530,51 +498,22 @@ class BinanceWebSocket {
             
         const support = (price * 0.95).toFixed(8);
         const resistance = (price * 1.05).toFixed(8);
-        
-        // 根据价格变化判断交易方向
-        let tradeDirection = '观望';
-        let reason = '';
-        
-        if (Math.abs(priceChange) >= 5) {
-            if (priceChange > 0) {
-                tradeDirection = '做多';
-                reason = '强势上涨趋势确立';
-            } else {
-                tradeDirection = '做空';
-                reason = '急速下跌趋势确立';
-            }
-        } else if (Math.abs(priceChange) >= 2) {
-            if (priceChange > 0) {
-                tradeDirection = '做多';
-                reason = '上涨趋势初现';
-            } else {
-                tradeDirection = '做空';
-                reason = '下跌趋势初现';
-            }
-        }
-        
-        const advice = tradeDirection === '观望' 
-            ? '建议观望等待更明确信号'
-            : `建议${tradeDirection}，${reason}`;
+        const advice = Math.abs(priceChange) >= 5
+            ? (priceChange > 0 ? '注意高位回调' : '等待企稳')
+            : '观望等待信号';
             
         return `${symbol}分析：
-1.价格趋势：${trend}
-2.成交量：成交量正常
-3.市场情绪：${priceChange > 0 ? '偏多' : '偏空'}
-4.技术形态：${priceChange > 0 ? '上升趋势' : '下降趋势'}
-5.支撑位：${support} USDT
-6.阻力位：${resistance} USDT
-7.操作建议：${advice}
-8.风险提示：注意市场波动风险
-
-交易建议：
-1.交易方向：${tradeDirection}${reason ? ` (${reason})` : ''}
-2.开仓价格：${price} USDT
-3.止损价格：${support} USDT
-4.止盈价格：${resistance} USDT
-5.建议仓位：10%
-6.持仓时间：${Math.abs(priceChange) >= 5 ? '短期' : '超短期'}
-7.注意事项：设置好止损，控制风险`;
+1.趋势：${trend}
+2.支撑位：${support} USDT
+3.阻力位：${resistance} USDT
+4.建议：${advice}
+5.风险：注意市场波动
+6.开单建议：
+- 方向：${priceChange > 0 ? '做多' : '做空'}
+- 开仓价：${price} USDT
+- 止损价：${support} USDT
+- 止盈价：${resistance} USDT
+- 仓位：10%`;
     }
 
     // 计算移动平均线
@@ -735,7 +674,21 @@ class BinanceWebSocket {
         
         // 如果有分析总结，单独发送一条消息
         if (summary) {
-            const summaryMessage = `📊 *${symbol} 多次提醒分析总结* 📊\n\n${summary}`;
+            const summaryMessage = `📊 *${symbol} 15分钟价格变动总结* 📊\n\n` +
+                `*价格信息:*\n` +
+                `• 当前价格: ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
+                `• 价格变化: ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%\n\n` +
+                `*技术分析:*\n` +
+                `• 支撑位: ${(price * 0.95).toFixed(8)} USDT\n` +
+                `• 阻力位: ${(price * 1.05).toFixed(8)} USDT\n\n` +
+                `*AI分析总结:*\n${summary}\n\n` +
+                `*开单建议:*\n` +
+                `• 方向: ${priceChange > 0 ? '做多' : '做空'}\n` +
+                `• 开仓价: ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
+                `• 止损价: ${(price * 0.95).toFixed(8)} USDT\n` +
+                `• 止盈价: ${(price * 1.05).toFixed(8)} USDT\n` +
+                `• 仓位: 10%`;
+            
             bot.sendMessage(TELEGRAM_CHANNEL_ID, summaryMessage, { parse_mode: 'Markdown' });
         }
     }
@@ -1222,128 +1175,99 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // 添加消息队列处理函数
 async function processMessageQueue() {
-    if (isProcessingQueue || messageQueue.length === 0) return;
-    
-    isProcessingQueue = true;
-    const now = Date.now();
-    
-    // 清理过期消息
-    while (messageQueue.length > 0 && now - messageQueue[0].timestamp > MESSAGE_EXPIRY) {
-        messageQueue.shift();
+  if (isProcessingQueue || messageQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  while (messageQueue.length > 0) {
+    const { chatId, message } = messageQueue.shift();
+    try {
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      await delay(MESSAGE_DELAY);
+    } catch (error) {
+      console.error('发送消息失败:', error);
+      if (error.code === 'ETELEGRAM' && error.response.body.error_code === 429) {
+        // 如果遇到速率限制，等待指定时间后重试
+        const retryAfter = error.response.body.parameters.retry_after || 5;
+        await delay(retryAfter * 1000);
+        messageQueue.unshift({ chatId, message });
+      }
     }
-    
-    while (messageQueue.length > 0) {
-        const { chatId, message, timestamp, retryCount = 0 } = messageQueue.shift();
-        
-        // 如果消息已过期，跳过
-        if (now - timestamp > MESSAGE_EXPIRY) continue;
-        
-        try {
-            await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-            await delay(MESSAGE_DELAY);
-        } catch (error) {
-            console.error('发送消息失败:', error);
-            if (error.code === 'ETELEGRAM' && error.response.body.error_code === 429) {
-                // 如果遇到速率限制，等待指定时间后重试
-                const retryAfter = error.response.body.parameters.retry_after || 5;
-                await delay(retryAfter * 1000);
-                
-                // 如果重试次数小于3次，重新加入队列
-                if (retryCount < 3) {
-                    messageQueue.unshift({ 
-                        chatId, 
-                        message, 
-                        timestamp, 
-                        retryCount: retryCount + 1 
-                    });
-                }
-            }
-        }
-    }
-    isProcessingQueue = false;
+  }
+  isProcessingQueue = false;
 }
 
 // 修改发送消息的函数
 async function sendMessage(chatId, message) {
-    // 如果队列已满，移除最早的消息
-    if (messageQueue.length >= MAX_QUEUE_SIZE) {
-        messageQueue.shift();
-    }
-    
-    messageQueue.push({ 
-        chatId, 
-        message, 
-        timestamp: Date.now() 
-    });
-    processMessageQueue();
+  messageQueue.push({ chatId, message });
+  processMessageQueue();
 }
 
 // 修改所有使用bot.sendMessage的地方
 async function notifyPriceAlert(symbol, price, priceChange) {
-    const message = `🔔 *${symbol} 价格${priceChange > 0 ? '上涨' : '下跌'}提醒* 🔔\n\n` +
-        `*交易对:* ${symbol}\n` +
-        `*当前价格:* ${price} USDT\n` +
-        `*24小时变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
-        `_时间: ${new Date().toLocaleString()}_`;
-    
-    // 发送给订阅用户
-    for (const userId of subscribedUsers) {
-        await sendMessage(userId, message);
-    }
-    
-    // 发送到频道
-    await sendMessage(TELEGRAM_CHANNEL_ID, message);
+  const message = `🔔 *${symbol} 价格${priceChange > 0 ? '上涨' : '下跌'}提醒* 🔔\n\n` +
+    `*交易对:* ${symbol}\n` +
+    `*当前价格:* ${price} USDT\n` +
+    `*24小时变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
+    `_时间: ${new Date().toLocaleString()}_`;
+  
+  // 发送给订阅用户
+  for (const userId of subscribedUsers) {
+    await sendMessage(userId, message);
+  }
+  
+  // 发送到频道
+  await sendMessage(TELEGRAM_CHANNEL_ID, message);
 }
 
 async function notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis) {
-    const message = `🚨 *${symbol} 价格${priceChange > 0 ? '暴涨' : '暴跌'}提醒* 🚨\n\n` +
-        `*交易对:* ${symbol}\n` +
-        `*当前价格:* ${price} USDT\n` +
-        `*30分钟变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
-        `*AI分析:*\n${aiAnalysis}\n\n` +
-        `_时间: ${new Date().toLocaleString()}_`;
-    
-    // 发送给订阅用户
-    for (const userId of subscribedUsers) {
-        await sendMessage(userId, message);
-    }
-    
-    // 发送到频道
-    await sendMessage(TELEGRAM_CHANNEL_ID, message);
+  const message = `🚨 *${symbol} 价格${priceChange > 0 ? '暴涨' : '暴跌'}提醒* 🚨\n\n` +
+    `*交易对:* ${symbol}\n` +
+    `*当前价格:* ${price} USDT\n` +
+    `*30分钟变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
+    `*AI分析:*\n${aiAnalysis}\n\n` +
+    `_时间: ${new Date().toLocaleString()}_`;
+  
+  // 发送给订阅用户
+  for (const userId of subscribedUsers) {
+    await sendMessage(userId, message);
+  }
+  
+  // 发送到频道
+  await sendMessage(TELEGRAM_CHANNEL_ID, message);
 }
 
 async function notifyNewTokens(newSymbols) {
-    const message = `🆕 *新币上线提醒* 🆕\n\n` +
-        newSymbols.map(token => 
-            `*${token.symbol}*\n` +
-            `价格: ${token.price} USDT\n` +
-            `24h成交量: ${token.volume} USDT\n` +
-            `24h涨跌幅: ${token.priceChange}%\n`
-        ).join('\n') +
-        `\n_时间: ${new Date().toLocaleString()}_`;
-    
-    // 发送给订阅用户
-    for (const userId of subscribedUsers) {
-        await sendMessage(userId, message);
-    }
-    
-    // 发送到频道
-    await sendMessage(TELEGRAM_CHANNEL_ID, message);
+  const message = `🆕 *新币上线提醒* 🆕\n\n` +
+    newSymbols.map(token => 
+      `*${token.symbol}*\n` +
+      `价格: ${token.price} USDT\n` +
+      `24h成交量: ${token.volume} USDT\n` +
+      `24h涨跌幅: ${token.priceChange}%\n`
+    ).join('\n') +
+    `\n_时间: ${new Date().toLocaleString()}_`;
+  
+  // 发送给订阅用户
+  for (const userId of subscribedUsers) {
+    await sendMessage(userId, message);
+  }
+  
+  // 发送到频道
+  await sendMessage(TELEGRAM_CHANNEL_ID, message);
 }
 
 async function notifyVolumeUpdate(topSymbols) {
-    const message = `📊 *交易量排名更新* 📊\n\n` +
-        `*前10名交易对:*\n` +
-        topSymbols.slice(0, 10).map((symbol, index) => 
-            `${index + 1}. ${symbol.symbol}: ${symbol.volume} USDT`
-        ).join('\n') +
-        `\n\n_时间: ${new Date().toLocaleString()}_`;
-    
-    // 发送给订阅用户
-    for (const userId of subscribedUsers) {
-        await sendMessage(userId, message);
-    }
-    
-    // 发送到频道
-    await sendMessage(TELEGRAM_CHANNEL_ID, message);
+  const message = `📊 *交易量排名更新* 📊\n\n` +
+    `*前10名交易对:*\n` +
+    topSymbols.slice(0, 10).map((symbol, index) => 
+      `${index + 1}. ${symbol.symbol}: ${symbol.volume} USDT`
+    ).join('\n') +
+    `\n\n_时间: ${new Date().toLocaleString()}_`;
+  
+  // 发送给订阅用户
+  for (const userId of subscribedUsers) {
+    await sendMessage(userId, message);
+  }
+  
+  // 发送到频道
+  await sendMessage(TELEGRAM_CHANNEL_ID, message);
 } 
