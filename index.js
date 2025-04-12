@@ -940,48 +940,84 @@ class BinanceWebSocket {
 
     // 添加生成分析总结的方法
     async generateAnalysisSummary(symbol, alerts) {
-        const prompt = `分析${symbol}的多次价格变动：
+        const maxRetries = 3;
+        const retryDelay = 2000; // 2秒
 
-${alerts.map((alert, index) => `
-第${index + 1}次提醒：
-时间：${new Date(alert.timestamp).toLocaleString()}
-价格：${alert.price} USDT
-变化：${alert.priceChange > 0 ? '+' : ''}${alert.priceChange.toFixed(2)}%
-分析：${alert.analysis}
-`).join('\n')}
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const prompt = `分析${symbol}的多次价格变动：
+                
+                ${alerts.map((alert, index) => `
+                第${index + 1}次提醒：
+                时间：${new Date(alert.timestamp).toLocaleString()}
+                价格：${alert.price} USDT
+                变化：${alert.priceChange > 0 ? '+' : ''}${alert.priceChange.toFixed(2)}%
+                分析：${alert.analysis}
+                `).join('\n')}
+                
+                请总结：
+                1.价格走势：(20字)
+                2.趋势变化：(20字)
+                3.风险等级：(10字)
+                4.操作建议：(30字)
+                5.关键价位：
+                - 支撑位：${alerts[alerts.length - 1].price * 0.95} USDT
+                - 阻力位：${alerts[alerts.length - 1].price * 1.05} USDT
+                6.开单建议：
+                - 方向：${alerts[alerts.length - 1].priceChange > 0 ? '做多' : '做空'}
+                - 开仓价：${alerts[alerts.length - 1].price} USDT
+                - 止损价：${alerts[alerts.length - 1].price * 0.95} USDT
+                - 止盈价：${alerts[alerts.length - 1].price * 1.05} USDT
+                - 仓位：10%`;
 
-请总结：
-1.价格走势：(20字)
-2.趋势变化：(20字)
-3.风险等级：(10字)
-4.操作建议：(30字)
-5.关键价位：
-- 支撑位：${alerts[alerts.length - 1].price * 0.95} USDT
-- 阻力位：${alerts[alerts.length - 1].price * 1.05} USDT
-6.开单建议：
-- 方向：${alerts[alerts.length - 1].priceChange > 0 ? '做多' : '做空'}
-- 开仓价：${alerts[alerts.length - 1].price} USDT
-- 止损价：${alerts[alerts.length - 1].price * 0.95} USDT
-- 止盈价：${alerts[alerts.length - 1].price * 1.05} USDT
-- 仓位：10%`;
+                const response = await axios.post(process.env.DEEPSEEK_API_URL, {
+                    model: "deepseek-chat",
+                    messages: [
+                        {
+                            role: "user",
+                            content: prompt
+                        }
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 1000
+                }, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
+                    },
+                    timeout: 30000 // 30秒超时
+                });
 
-        try {
-            const response = await axios.post(process.env.DEEPSEEK_API_URL, {
-                model: "deepseek-chat",
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.7,
-                max_tokens: 800
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-                    'Content-Type': 'application/json'
+                if (response.data && response.data.choices && response.data.choices[0]) {
+                    return response.data.choices[0].message.content;
                 }
-            });
+                throw new Error('API响应格式无效');
 
-            return response.data.choices[0].message.content;
-        } catch (error) {
-            console.error('生成分析总结失败:', error);
-            return '无法生成分析总结';
+            } catch (error) {
+                console.error(`生成分析总结失败 (尝试 ${attempt}/${maxRetries}):`, error);
+                
+                if (attempt === maxRetries) {
+                    // 如果所有重试都失败，返回一个基本的分析总结
+                    return `由于技术原因无法生成AI分析，以下是基本信息：
+                    
+                    1.价格走势：${alerts[alerts.length - 1].priceChange > 0 ? '上涨' : '下跌'}
+                    2.趋势变化：${Math.abs(alerts[alerts.length - 1].priceChange)}% 波动
+                    3.风险等级：中等
+                    4.操作建议：建议观望，等待趋势明确
+                    5.关键价位：
+                    - 支撑位：${alerts[alerts.length - 1].price * 0.95} USDT
+                    - 阻力位：${alerts[alerts.length - 1].price * 1.05} USDT
+                    6.开单建议：
+                    - 方向：${alerts[alerts.length - 1].priceChange > 0 ? '做多' : '做空'}
+                    - 开仓价：${alerts[alerts.length - 1].price} USDT
+                    - 止损价：${alerts[alerts.length - 1].price * 0.95} USDT
+                    - 止盈价：${alerts[alerts.length - 1].price * 1.05} USDT
+                    - 仓位：10%`;
+                }
+                
+                // 等待一段时间后重试
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
         }
     }
 }
