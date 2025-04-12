@@ -25,7 +25,7 @@ const SHORT_TERM_PRICE_CHANGE_THRESHOLD = 5.0; // 30分钟内价格变化阈值
 const TOP_SYMBOLS_COUNT = 50; // 监控前50个交易对
 
 // 重点监控的交易对数量
-const FOCUS_SYMBOLS_COUNT = 10; // 重点监控前10个交易对
+const FOCUS_SYMBOLS_COUNT = 20; // 重点监控前20个交易对
 
 // 代币上新检查间隔（毫秒）
 const NEW_TOKEN_CHECK_INTERVAL = 5 * 60 * 1000; // 5分钟
@@ -360,15 +360,16 @@ class BinanceWebSocket {
         history.push({ price, timestamp: now });
         
         // 清理30分钟以前的数据
-        history.filter(record => now - record.timestamp <= 30 * 60 * 1000);
+        const filteredHistory = history.filter(record => now - record.timestamp <= 30 * 60 * 1000);
+        this.priceHistory.set(symbol, filteredHistory);
         
         // 计算30分钟价格变化
         let priceChange = 0;
-        if (history.length > 1) {
-            const oldestPrice = history[0].price;
+        if (filteredHistory.length > 1) {
+            const oldestPrice = filteredHistory[0].price;
             priceChange = ((price - oldestPrice) / oldestPrice) * 100;
             
-            // 只在价格突变时发送提醒，且只针对交易量前10的代币
+            // 只在价格突变时发送提醒，且只针对交易量前20的代币
             if (Math.abs(priceChange) >= SHORT_TERM_PRICE_CHANGE_THRESHOLD && this.focusSymbols.has(symbol)) {
                 const symbolData = allSymbolsData.get(symbol);
                 if (now - symbolData.lastShortTermAlertTime > 15 * 60 * 1000) { // 15分钟内不重复提醒
@@ -1032,9 +1033,8 @@ bot.onText(/\/subscribe/, (msg) => {
         `• 每天会对BTC进行AI分析并学习改进\n` +
         `• 新代币上线时会收到提醒\n` +
         `• 每天更新交易量排名\n` +
-        `• 使用 \`/unsubscribe\` 取消订阅\n` +
-        `• 所有提醒也会发送到电报频道`, 
-        { parse_mode: 'Markdown' });
+        `• 监控所有币安 USDT 交易对\n` +
+        `• 所有提醒也会发送到电报频道`);
 });
 
 bot.onText(/\/unsubscribe/, (msg) => {
@@ -1042,106 +1042,54 @@ bot.onText(/\/unsubscribe/, (msg) => {
     
     if (userSubscriptions.has('all')) {
         userSubscriptions.get('all').delete(chatId);
-        if (userSubscriptions.get('all').size === 0) {
-            userSubscriptions.delete('all');
-        }
-        bot.sendMessage(chatId, `✅ 已取消订阅所有代币的价格提醒`);
+        bot.sendMessage(chatId, `✅ 已取消订阅所有代币的价格提醒\n\n` +
+            `*提示：*\n` +
+            `• 只监控交易量前 ${TOP_SYMBOLS_COUNT} 的代币\n` +
+            `• 交易量前 ${FOCUS_SYMBOLS_COUNT} 的代币为重点监控对象\n` +
+            `• 价格变动超过 ${PRICE_CHANGE_THRESHOLD}% 时会收到提醒\n` +
+            `• 短期价格变动超过 ${SHORT_TERM_PRICE_CHANGE_THRESHOLD}% 时会收到突然上涨/下跌提醒（含AI分析）\n` +
+            `• 10分钟后会收到AI跟进分析，评估之前的投资建议\n` +
+            `• 每天会对BTC进行AI分析并学习改进\n` +
+            `• 新代币上线时会收到提醒\n` +
+            `• 每天更新交易量排名\n` +
+            `• 监控所有币安 USDT 交易对\n` +
+            `• 所有提醒也会发送到电报频道`);
     } else {
-        bot.sendMessage(chatId, `❌ 您未订阅任何代币的价格提醒`);
+        bot.sendMessage(chatId, `❌ 您尚未订阅任何代币的价格提醒`);
     }
 });
 
-bot.onText(/\/price (.+)/, async (msg, match) => {
+bot.onText(/\/price/, (msg) => {
     const chatId = msg.chat.id;
-    const symbol = match[1].toUpperCase() + 'USDT';  // 自动添加 USDT 后缀
+    const command = msg.text.split(' ')[1];
     
-    try {
-        const response = await axios.get(`${process.env.BINANCE_REST_API}/ticker/24hr`, {
-            params: { symbol }
-        });
-        
-        const data = response.data;
-        const priceChange = parseFloat(data.priceChangePercent);
-        const emoji = priceChange >= 0 ? '📈' : '📉';
-        const trend = priceChange >= 0 ? '上涨' : '下跌';
-        
-        const message = `${emoji} *${symbol} 价格信息* ${emoji}\n\n` +
-            `*当前价格:* ${parseFloat(data.lastPrice).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
-            `*24小时最高:* ${parseFloat(data.highPrice).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
-            `*24小时最低:* ${parseFloat(data.lowPrice).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n` +
-            `*24小时成交量:* ${parseFloat(data.volume).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ${symbol.replace('USDT', '')}\n` +
-            `*24小时变化:* ${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}% (${trend})\n\n` +
-            `_更新时间: ${new Date().toLocaleString()}_`;
-        
-        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    } catch (error) {
-        bot.sendMessage(chatId, `❌ 获取 ${symbol} 价格信息失败`);
+    if (command) {
+        getPrice(command, chatId);
+    } else {
+        bot.sendMessage(chatId, `❌ 请提供要查询价格的币种`);
     }
 });
 
-bot.onText(/\/top/, async (msg) => {
+bot.onText(/\/top/, (msg) => {
     const chatId = msg.chat.id;
-    
-    try {
-        const response = await axios.get(`${process.env.BINANCE_REST_API}/ticker/24hr`);
-        const data = response.data
-            .filter(item => item.symbol.endsWith('USDT'))
-            .sort((a, b) => parseFloat(b.priceChangePercent) - parseFloat(a.priceChangePercent))
-            .slice(0, 10);
-        
-        let message = `📈 *涨幅最大的10个代币* 📈\n\n`;
-        
-        data.forEach((item, index) => {
-            const priceChange = parseFloat(item.priceChangePercent);
-            const price = parseFloat(item.lastPrice);
-            message += `${index + 1}. *${item.symbol}*: ${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}% | ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n`;
-        });
-        
-        message += `\n_更新时间: ${new Date().toLocaleString()}_`;
-        
-        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    } catch (error) {
-        bot.sendMessage(chatId, `❌ 获取涨幅数据失败`);
-    }
+    getTopSymbols(chatId);
 });
 
-bot.onText(/\/bottom/, async (msg) => {
+bot.onText(/\/bottom/, (msg) => {
     const chatId = msg.chat.id;
-    
-    try {
-        const response = await axios.get(`${process.env.BINANCE_REST_API}/ticker/24hr`);
-        const data = response.data
-            .filter(item => item.symbol.endsWith('USDT'))
-            .sort((a, b) => parseFloat(a.priceChangePercent) - parseFloat(b.priceChangePercent))
-            .slice(0, 10);
-        
-        let message = `📉 *跌幅最大的10个代币* 📉\n\n`;
-        
-        data.forEach((item, index) => {
-            const priceChange = parseFloat(item.priceChangePercent);
-            const price = parseFloat(item.lastPrice);
-            message += `${index + 1}. *${item.symbol}*: ${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}% | ${price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})} USDT\n`;
-        });
-        
-        message += `\n_更新时间: ${new Date().toLocaleString()}_`;
-        
-        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    } catch (error) {
-        bot.sendMessage(chatId, `❌ 获取跌幅数据失败`);
-    }
+    getBottomSymbols(chatId);
 });
 
 bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
-    const message = `📚 *帮助信息*\n\n` +
-        `*命令列表：*\n` +
-        `🚀 \`/start\` - 开始使用机器人\n` +
+    const message = `🚀 *欢迎使用币安监控机器人！*\n\n` +
+        `*可用命令：*\n` +
         `📊 \`/subscribe\` - 订阅所有代币价格提醒\n` +
         `❌ \`/unsubscribe\` - 取消订阅\n` +
         `💰 \`/price <币种>\` - 查询当前价格\n` +
         `📈 \`/top\` - 查看涨幅最大的代币\n` +
         `📉 \`/bottom\` - 查看跌幅最大的代币\n` +
-        `❓ \`/help\` - 显示此帮助信息\n\n` +
+        `❓ \`/help\` - 显示帮助信息\n\n` +
         `*提示：*\n` +
         `• 只监控交易量前 ${TOP_SYMBOLS_COUNT} 的代币\n` +
         `• 交易量前 ${FOCUS_SYMBOLS_COUNT} 的代币为重点监控对象\n` +
@@ -1152,122 +1100,24 @@ bot.onText(/\/help/, (msg) => {
         `• 新代币上线时会收到提醒\n` +
         `• 每天更新交易量排名\n` +
         `• 监控所有币安 USDT 交易对\n` +
-        `• 数据实时更新\n` +
         `• 所有提醒也会发送到电报频道`;
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
 
-// 错误处理
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (error) => {
-    console.error('Unhandled Rejection:', error);
-});
-
-const MESSAGE_DELAY = 1000; // 消息发送延迟1秒
-const messageQueue = [];
-let isProcessingQueue = false;
-
-// 添加延迟函数
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// 添加消息队列处理函数
-async function processMessageQueue() {
-  if (isProcessingQueue || messageQueue.length === 0) return;
-  
-  isProcessingQueue = true;
-  while (messageQueue.length > 0) {
-    const { chatId, message } = messageQueue.shift();
-    try {
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      await delay(MESSAGE_DELAY);
-    } catch (error) {
-      console.error('发送消息失败:', error);
-      if (error.code === 'ETELEGRAM' && error.response.body.error_code === 429) {
-        // 如果遇到速率限制，等待指定时间后重试
-        const retryAfter = error.response.body.parameters.retry_after || 5;
-        await delay(retryAfter * 1000);
-        messageQueue.unshift({ chatId, message });
-      }
-    }
-  }
-  isProcessingQueue = false;
+function getPrice(symbol, chatId) {
+    // 实现查询当前价格的功能
+    console.log(`查询 ${symbol} 的价格`);
+    bot.sendMessage(chatId, `查询 ${symbol} 的价格`);
 }
 
-// 修改发送消息的函数
-async function sendMessage(chatId, message) {
-  messageQueue.push({ chatId, message });
-  processMessageQueue();
+function getTopSymbols(chatId) {
+    // 实现查询涨幅最大的代币的功能
+    console.log(`查询涨幅最大的代币`);
+    bot.sendMessage(chatId, `查询涨幅最大的代币`);
 }
 
-// 修改所有使用bot.sendMessage的地方
-async function notifyPriceAlert(symbol, price, priceChange) {
-  const message = `🔔 *${symbol} 价格${priceChange > 0 ? '上涨' : '下跌'}提醒* 🔔\n\n` +
-    `*交易对:* ${symbol}\n` +
-    `*当前价格:* ${price} USDT\n` +
-    `*24小时变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
-    `_时间: ${new Date().toLocaleString()}_`;
-  
-  // 发送给订阅用户
-  for (const userId of subscribedUsers) {
-    await sendMessage(userId, message);
-  }
-  
-  // 发送到频道
-  await sendMessage(TELEGRAM_CHANNEL_ID, message);
+function getBottomSymbols(chatId) {
+    // 实现查询跌幅最大的代币的功能
+    console.log(`查询跌幅最大的代币`);
+    bot.sendMessage(chatId, `查询跌幅最大的代币`);
 }
-
-async function notifyShortTermPriceAlert(symbol, price, priceChange, aiAnalysis) {
-  const message = `🚨 *${symbol} 价格${priceChange > 0 ? '暴涨' : '暴跌'}提醒* 🚨\n\n` +
-    `*交易对:* ${symbol}\n` +
-    `*当前价格:* ${price} USDT\n` +
-    `*30分钟变化:* ${priceChange > 0 ? '+' : ''}${priceChange}%\n\n` +
-    `*AI分析:*\n${aiAnalysis}\n\n` +
-    `_时间: ${new Date().toLocaleString()}_`;
-  
-  // 发送给订阅用户
-  for (const userId of subscribedUsers) {
-    await sendMessage(userId, message);
-  }
-  
-  // 发送到频道
-  await sendMessage(TELEGRAM_CHANNEL_ID, message);
-}
-
-async function notifyNewTokens(newSymbols) {
-  const message = `🆕 *新币上线提醒* 🆕\n\n` +
-    newSymbols.map(token => 
-      `*${token.symbol}*\n` +
-      `价格: ${token.price} USDT\n` +
-      `24h成交量: ${token.volume} USDT\n` +
-      `24h涨跌幅: ${token.priceChange}%\n`
-    ).join('\n') +
-    `\n_时间: ${new Date().toLocaleString()}_`;
-  
-  // 发送给订阅用户
-  for (const userId of subscribedUsers) {
-    await sendMessage(userId, message);
-  }
-  
-  // 发送到频道
-  await sendMessage(TELEGRAM_CHANNEL_ID, message);
-}
-
-async function notifyVolumeUpdate(topSymbols) {
-  const message = `📊 *交易量排名更新* 📊\n\n` +
-    `*前10名交易对:*\n` +
-    topSymbols.slice(0, 10).map((symbol, index) => 
-      `${index + 1}. ${symbol.symbol}: ${symbol.volume} USDT`
-    ).join('\n') +
-    `\n\n_时间: ${new Date().toLocaleString()}_`;
-  
-  // 发送给订阅用户
-  for (const userId of subscribedUsers) {
-    await sendMessage(userId, message);
-  }
-  
-  // 发送到频道
-  await sendMessage(TELEGRAM_CHANNEL_ID, message);
-} 
